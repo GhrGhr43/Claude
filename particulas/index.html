@@ -74,6 +74,9 @@ const MP_VERSION = '0.10.14';
 const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
 const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite';
 
+// Optional photo to show on start instead of the heart: an image URL or a data: URI.
+const DEFAULT_IMAGE = '';
+
 const ANALYSIS_MAX = 720;            // longest side, in pixels, used to analyse the image
 const BASE = { stars: 2600, dust: 22000, sky: 1800 };
 
@@ -451,16 +454,20 @@ async function showPhoto() {
   else status('');
 }
 
-function loadFile(file) {
-  if (!file || !file.type.startsWith('image/')) return;
-  const url = URL.createObjectURL(file);
+function loadUrl(url, onDone = () => {}) {
   const im = new Image();
   im.onload = () => {
     photo = im;
     ui('mode').value = 'brillo';
-    showPhoto().finally(() => URL.revokeObjectURL(url));
+    showPhoto().finally(onDone);
   };
   im.src = url;
+}
+
+function loadFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const url = URL.createObjectURL(file);
+  loadUrl(url, () => URL.revokeObjectURL(url));
 }
 
 // ---------- Input & UI ----------
@@ -490,10 +497,14 @@ addEventListener('resize', () => {
 });
 
 resize();
-ui('mode').value = 'original';
-analysis = await analyse(heartSource(), { alphaMask: true });
-build();
 requestAnimationFrame(frame);
+if (DEFAULT_IMAGE) {
+  loadUrl(DEFAULT_IMAGE);
+} else {
+  ui('mode').value = 'original';
+  analysis = await analyse(heartSource(), { alphaMask: true });
+  build();
+}
 </script>
 </body>
 </html>

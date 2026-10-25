@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Imagen de partículas</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #050002; color: #ddd; font: 14px system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #panel {
+    position: fixed; top: 12px; left: 12px; padding: 10px 12px; border-radius: 10px;
+    background: rgba(20, 10, 14, .75); backdrop-filter: blur(6px); display: grid; gap: 8px; max-width: 280px;
+  }
+  #panel label { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 8px; }
+  #panel button, #panel select { background: #2a1219; color: #eee; border: 1px solid #5a2533; border-radius: 6px; padding: 4px 8px; }
+  #hint { opacity: .7; font-size: 12px; }
+  #panel.hidden > :not(#toggle) { display: none; }
+  #drop { position: fixed; inset: 0; display: none; place-items: center; font-size: 22px; background: rgba(80, 0, 20, .4); pointer-events: none; }
+  body.dragging #drop { display: grid; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <button id="toggle">Ocultar panel</button>
+  <button id="pick">Cargar imagen…</button>
+  <input id="file" type="file" accept="image/*" hidden>
+  <label>Color
+    <select id="mode">
+      <option value="original">Original</option>
+      <option value="rojo">Rojo (como el reel)</option>
+    </select>
+  </label>
+  <label>Densidad <input id="step" type="range" min="2" max="8" value="3"></label>
+  <label>Radio <input id="radius" type="range" min="30" max="250" value="110"></label>
+  <label>Fuerza <input id="force" type="range" min="1" max="30" value="10"></label>
+  <label>Viscosidad <input id="visc" type="range" min="80" max="98" value="91"></label>
+  <div id="hint">Pasa el cursor por encima. También puedes arrastrar una imagen a la ventana.</div>
+</div>
+<div id="drop">Suelta la imagen aquí</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const ui = id => document.getElementById(id);
+
+let W = 0, H = 0, img = null, frame = null, buf = null;
+// Particle state lives in typed arrays: home position, current position, velocity, color.
+let n = 0, hx, hy, px, py, vx, vy, col, colRed;
+
+const mouse = { x: -1e9, y: -1e9, vx: 0, vy: 0, active: false };
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = canvas.width = Math.floor(innerWidth * dpr);
+  H = canvas.height = Math.floor(innerHeight * dpr);
+  frame = ctx.createImageData(W, H);
+  buf = new Uint32Array(frame.data.buffer);
+  build();
+}
+
+// Same gradient as get_col() in the reel: (70,0,10) -> (255,30,50).
+function redFor(f) {
+  f = Math.max(0, Math.min(1, f));
+  const r = 70 + 185 * f, g = 30 * f, b = 10 + 40 * f;
+  return pack(r, g, b);
+}
+
+function pack(r, g, b) {
+  return (255 << 24) | (b << 16) | (g << 8) | r; // little-endian RGBA
+}
+
+function alloc(count) {
+  n = count;
+  hx = new Float32Array(n); hy = new Float32Array(n);
+  px = new Float32Array(n); py = new Float32Array(n);
+  vx = new Float32Array(n); vy = new Float32Array(n);
+  col = new Uint32Array(n); colRed = new Uint32Array(n);
+}
+
+function build() {
+  if (img) buildFromImage(); else buildHeart();
+}
+
+// Default scene: the heart from the reel, so the page isn't empty before loading a photo.
+function buildHeart() {
+  const heart = u => [
+    1.6 * Math.sin(u) ** 3,
+    1.3 * Math.cos(u) - 0.5 * Math.cos(2 * u) - 0.2 * Math.cos(3 * u) - 0.1 * Math.cos(4 * u),
+  ];
+  const poly = Array.from({ length: 300 }, (_, i) => heart(i / 300 * Math.PI * 2));
+  const ys = poly.map(p => p[1]), yMin = Math.min(...ys), yMax = Math.max(...ys);
+  const scale = Math.min(W / 3.6, H / (yMax - yMin) * 0.85), cy = (yMax + yMin) / 2;
+  const inside = (x, y) => {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  };
+
+  // Rejection sampling fills the heart evenly (sampling the angle bunches points on the center line).
+  const N = 9000;
+  alloc(N);
+  for (let i = 0; i < N; ) {
+    const x = (Math.random() * 2 - 1) * 1.6, y = yMin + Math.random() * (yMax - yMin);
+    if (!inside(x, y)) continue;
+    const z = Math.random() * 2 - 1;
+    hx[i] = W / 2 + x * scale;
+    hy[i] = H / 2 - (y - cy) * scale;
+    colRed[i] = col[i] = redFor((z + 1) / 2);
+    i++;
+  }
+  scatter();
+}
+
+// Sample the image on a grid; each sampled pixel becomes one particle with that pixel's color.
+function buildFromImage() {
+  const step = +ui('step').value * Math.min(window.devicePixelRatio || 1, 2);
+  const fit = Math.min(W / img.width, H / img.height) * 0.95;
+  const dw = Math.floor(img.width * fit), dh = Math.floor(img.height * fit);
+  const ox = (W - dw) >> 1, oy = (H - dh) >> 1;
+
+  const off = document.createElement('canvas');
+  off.width = dw; off.height = dh;
+  const octx = off.getContext('2d', { willReadFrequently: true });
+  octx.drawImage(img, 0, 0, dw, dh);
+  const data = octx.getImageData(0, 0, dw, dh).data;
+
+  const xs = [], ys = [], cs = [], rs = [];
+  for (let y = 0; y < dh; y += step) {
+    for (let x = 0; x < dw; x += step) {
+      const k = ((y | 0) * dw + (x | 0)) * 4;
+      const r = data[k], g = data[k + 1], b = data[k + 2], a = data[k + 3];
+      if (a < 128) continue;
+      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      // Very dark pixels are thinned out so shadows read as empty space, like the reel.
+      if (lum < 0.08 && Math.random() > lum * 8) continue;
+      const jx = (Math.random() - 0.5) * step * 0.6, jy = (Math.random() - 0.5) * step * 0.6;
+      xs.push(ox + x + jx); ys.push(oy + y + jy);
+      cs.push(pack(r, g, b)); rs.push(redFor(lum * 1.3));
+    }
+  }
+  alloc(xs.length);
+  hx.set(xs); hy.set(ys); col.set(cs); colRed.set(rs);
+  scatter();
+}
+
+// Particles start scattered and flow into place.
+function scatter() {
+  for (let i = 0; i < n; i++) {
+    px[i] = Math.random() * W; py[i] = Math.random() * H;
+    vx[i] = vy[i] = 0;
+  }
+}
+
+function step() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const R = +ui('radius').value * dpr, R2 = R * R;
+  const F = +ui('force').value * 0.35;
+  const damp = +ui('visc').value / 100;
+  const spring = 0.012;
+  const red = ui('mode').value === 'rojo';
+  const colors = red ? colRed : col;
+  const mx = mouse.x, my = mouse.y, mvx = mouse.vx, mvy = mouse.vy;
+  const stir = Math.min(Math.hypot(mvx, mvy), 60);
+
+  buf.fill(0xff020005);
+  for (let i = 0; i < n; i++) {
+    let ax = (hx[i] - px[i]) * spring, ay = (hy[i] - py[i]) * spring;
+
+    if (mouse.active) {
+      const dx = px[i] - mx, dy = py[i] - my, d2 = dx * dx + dy * dy;
+      if (d2 < R2 && d2 > 0.01) {
+        const d = Math.sqrt(d2), t = 1 - d / R, s = t * t;
+        // Push outward from the cursor, plus drag along its motion so it feels like stirring a liquid.
+        ax += (dx / d) * s * F + mvx * s * 0.12;
+        ay += (dy / d) * s * F + mvy * s * 0.12;
+        // A little swirl perpendicular to the push gives the flow some curl.
+        ax += (-dy / d) * s * stir * 0.02;
+        ay += (dx / d) * s * stir * 0.02;
+      }
+    }
+
+    vx[i] = (vx[i] + ax) * damp;
+    vy[i] = (vy[i] + ay) * damp;
+    px[i] += vx[i]; py[i] += vy[i];
+
+    const x = px[i] | 0, y = py[i] | 0;
+    if (x < 0 || y < 0 || x >= W - 1 || y >= H - 1) continue;
+    const k = y * W + x, c = colors[i];
+    buf[k] = c; buf[k + 1] = c; buf[k + W] = c; buf[k + W + 1] = c;
+  }
+  ctx.putImageData(frame, 0, 0);
+
+  mouse.vx *= 0.8; mouse.vy *= 0.8;
+  requestAnimationFrame(step);
+}
+
+function pointer(e) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const x = e.clientX * dpr, y = e.clientY * dpr;
+  if (mouse.active) { mouse.vx = x - mouse.x; mouse.vy = y - mouse.y; }
+  mouse.x = x; mouse.y = y; mouse.active = true;
+}
+canvas.addEventListener('pointermove', pointer);
+canvas.addEventListener('pointerdown', pointer);
+canvas.addEventListener('pointerleave', () => { mouse.active = false; });
+
+function loadFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const url = URL.createObjectURL(file);
+  const im = new Image();
+  im.onload = () => { img = im; build(); URL.revokeObjectURL(url); };
+  im.src = url;
+}
+
+ui('pick').onclick = () => ui('file').click();
+ui('file').onchange = e => loadFile(e.target.files[0]);
+ui('step').oninput = () => img && build();
+ui('toggle').onclick = () => {
+  const p = ui('panel');
+  p.classList.toggle('hidden');
+  ui('toggle').textContent = p.classList.contains('hidden') ? 'Mostrar panel' : 'Ocultar panel';
+};
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+addEventListener('dragleave', () => document.body.classList.remove('dragging'));
+addEventListener('drop', e => {
+  e.preventDefault(); document.body.classList.remove('dragging');
+  loadFile(e.dataTransfer.files[0]);
+});
+addEventListener('resize', resize);
+
+resize();
+requestAnimationFrame(step);
+</script>
+</body>
+</html>

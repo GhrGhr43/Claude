@@ -2,239 +2,498 @@
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Imagen de partículas</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Partículas de luz</title>
 <style>
   :root { color-scheme: dark; }
-  html, body { margin: 0; height: 100%; background: #050002; color: #ddd; font: 14px system-ui, sans-serif; overflow: hidden; }
-  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
-  #panel {
-    position: fixed; top: 12px; left: 12px; padding: 10px 12px; border-radius: 10px;
-    background: rgba(20, 10, 14, .75); backdrop-filter: blur(6px); display: grid; gap: 8px; max-width: 280px;
+  html, body { margin: 0; height: 100%; background: #000; color: #e8e8ee; font: 15px system-ui, sans-serif; overflow: hidden; overscroll-behavior: none; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block; touch-action: none; }
+  .bar {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: max(16px, env(safe-area-inset-bottom));
+    display: flex; gap: 8px; z-index: 2;
   }
-  #panel label { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 8px; }
-  #panel button, #panel select { background: #2a1219; color: #eee; border: 1px solid #5a2533; border-radius: 6px; padding: 4px 8px; }
-  #hint { opacity: .7; font-size: 12px; }
-  #panel.hidden > :not(#toggle) { display: none; }
-  #drop { position: fixed; inset: 0; display: none; place-items: center; font-size: 22px; background: rgba(80, 0, 20, .4); pointer-events: none; }
-  body.dragging #drop { display: grid; }
+  button, select {
+    font: inherit; color: #f2f2f6; background: rgba(30, 30, 40, .72); border: 1px solid rgba(255, 255, 255, .18);
+    border-radius: 999px; padding: 10px 16px; white-space: nowrap; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  #panel {
+    position: fixed; left: 12px; right: 12px; bottom: calc(max(16px, env(safe-area-inset-bottom)) + 56px);
+    max-width: 360px; margin: 0 auto; padding: 14px 16px; border-radius: 16px; z-index: 2;
+    background: rgba(20, 20, 28, .82); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    display: none; gap: 12px;
+  }
+  #panel.open { display: grid; }
+  #panel label { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 10px; }
+  #panel select { border-radius: 10px; padding: 6px 10px; }
+  #panel .check { grid-template-columns: auto 1fr; }
+  input[type=range] { width: 100%; }
+  input[type=checkbox] { width: 20px; height: 20px; }
+  #status {
+    position: fixed; top: max(14px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+    padding: 6px 14px; border-radius: 999px; background: rgba(30, 30, 40, .72); font-size: 13px;
+    transition: opacity .4s; z-index: 2; white-space: nowrap;
+  }
+  #status:empty { opacity: 0; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="status"></div>
+
 <div id="panel">
-  <button id="toggle">Ocultar panel</button>
-  <button id="pick">Cargar imagen…</button>
-  <input id="file" type="file" accept="image/*" hidden>
   <label>Color
     <select id="mode">
-      <option value="original">Original</option>
+      <option value="brillo">Brillo (blanco)</option>
+      <option value="original">Colores de la foto</option>
       <option value="rojo">Rojo (como el reel)</option>
     </select>
   </label>
-  <label>Densidad <input id="step" type="range" min="2" max="8" value="3"></label>
-  <label>Radio <input id="radius" type="range" min="30" max="250" value="110"></label>
-  <label>Fuerza <input id="force" type="range" min="1" max="30" value="10"></label>
-  <label>Viscosidad <input id="visc" type="range" min="80" max="98" value="91"></label>
-  <div id="hint">Pasa el cursor por encima. También puedes arrastrar una imagen a la ventana.</div>
+  <label>Puntos
+    <select id="density">
+      <option value="0.55">Pocos</option>
+      <option value="1" selected>Medio</option>
+      <option value="1.7">Muchos</option>
+    </select>
+  </label>
+  <label>Radio <input id="radius" type="range" min="40" max="220" value="100"></label>
+  <label>Fuerza <input id="force" type="range" min="2" max="30" value="12"></label>
+  <label>Viscosidad <input id="visc" type="range" min="80" max="97" value="90"></label>
+  <label class="check"><input id="cutout" type="checkbox" checked> Quitar el fondo (solo la persona)</label>
 </div>
-<div id="drop">Suelta la imagen aquí</div>
 
-<script>
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
+<div class="bar">
+  <button id="pick">Cargar foto</button>
+  <button id="settings">Ajustes</button>
+</div>
+<input id="file" type="file" accept="image/*" hidden>
+
+<script type="module">
+// MediaPipe selfie segmentation runs in the browser to cut the person out of the background.
+const MP_VERSION = '0.10.14';
+const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
+const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite';
+
+const ANALYSIS_MAX = 720;            // longest side, in pixels, used to analyse the image
+const BASE = { stars: 2600, dust: 22000, sky: 1800 };
+
 const ui = id => document.getElementById(id);
+const canvas = ui('c');
+const status = text => { ui('status').textContent = text; };
 
-let W = 0, H = 0, img = null, frame = null, buf = null;
-// Particle state lives in typed arrays: home position, current position, velocity, color.
-let n = 0, hx, hy, px, py, vx, vy, col, colRed;
+// ---------- WebGL setup ----------
+const gl = canvas.getContext('webgl', { antialias: false, alpha: false, premultipliedAlpha: false });
+if (!gl) status('Tu navegador no soporta WebGL');
 
-const mouse = { x: -1e9, y: -1e9, vx: 0, vy: 0, active: false };
+const VS = `
+attribute vec3 aPos;      // x, y in device pixels, z = speed
+attribute vec4 aColor;
+attribute float aSize;
+attribute float aPhase;
+uniform vec2 uRes;
+uniform float uTime;
+varying vec4 vColor;
+void main() {
+  vec2 c = aPos.xy / uRes * 2.0 - 1.0;
+  gl_Position = vec4(c.x, -c.y, 0.0, 1.0);
+  float speed = 1.0 + fract(aPhase * 7.31) * 2.5;
+  float twinkle = 0.72 + 0.28 * sin(uTime * speed + aPhase * 6.2831);
+  float moving = min(aPos.z * 0.08, 0.8);
+  gl_PointSize = aSize * (1.0 + moving * 0.4);
+  vColor = vec4(aColor.rgb, min(aColor.a * twinkle + moving, 1.0));
+}`;
+const FS = `
+precision mediump float;
+varying vec4 vColor;
+void main() {
+  vec2 p = gl_PointCoord * 2.0 - 1.0;
+  float r2 = dot(p, p);
+  if (r2 > 1.0) discard;
+  float a = (exp(-r2 * 14.0) + exp(-r2 * 3.5) * 0.35) * vColor.a;
+  gl_FragColor = vec4(vColor.rgb * a, 1.0);
+}`;
+
+function shader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+const loc = {
+  pos: gl.getAttribLocation(prog, 'aPos'), color: gl.getAttribLocation(prog, 'aColor'),
+  size: gl.getAttribLocation(prog, 'aSize'), phase: gl.getAttribLocation(prog, 'aPhase'),
+  res: gl.getUniformLocation(prog, 'uRes'), time: gl.getUniformLocation(prog, 'uTime'),
+};
+const buffers = { pos: gl.createBuffer(), color: gl.createBuffer(), size: gl.createBuffer(), phase: gl.createBuffer() };
+function attrib(buf, l, n) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(l);
+  gl.vertexAttribPointer(l, n, gl.FLOAT, false, 0, 0);
+}
+attrib(buffers.pos, loc.pos, 3);
+attrib(buffers.color, loc.color, 4);
+attrib(buffers.size, loc.size, 1);
+attrib(buffers.phase, loc.phase, 1);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.ONE, gl.ONE);   // additive: overlapping glows add up like light
+gl.clearColor(0, 0, 0, 1);
+
+// ---------- Particle state ----------
+let W = 0, H = 0, dpr = 1;
+let n = 0, hx, hy, pos, vx, vy, sizes, phases, palettes = {};
+let analysis = null, reach = 1;
+const pointer = { x: -1e9, y: -1e9, vx: 0, vy: 0, active: false };
 
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  W = canvas.width = Math.floor(innerWidth * dpr);
-  H = canvas.height = Math.floor(innerHeight * dpr);
-  frame = ctx.createImageData(W, H);
-  buf = new Uint32Array(frame.data.buffer);
-  build();
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.floor(innerWidth * dpr), h = Math.floor(innerHeight * dpr);
+  // Mobile browsers resize slightly when the URL bar hides; only relayout on real changes.
+  const changed = Math.abs(w - W) > W * 0.15 || Math.abs(h - H) > H * 0.15;
+  W = canvas.width = w; H = canvas.height = h;
+  gl.viewport(0, 0, W, H);
+  return changed;
 }
 
-// Same gradient as get_col() in the reel: (70,0,10) -> (255,30,50).
+// ---------- Image analysis ----------
+function luminance(data, count) {
+  const lum = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const k = i * 4;
+    lum[i] = (0.299 * data[k] + 0.587 * data[k + 1] + 0.114 * data[k + 2]) / 255;
+  }
+  return lum;
+}
+
+// 3x3 box blur; edges are clamped so the photo's border doesn't look like an outline.
+function blur3(src, w, h) {
+  const out = new Float32Array(src.length);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let sum = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const yy = Math.min(h - 1, Math.max(0, y + dy)), xx = Math.min(w - 1, Math.max(0, x + dx));
+      sum += src[yy * w + xx];
+    }
+    out[y * w + x] = sum / 9;
+  }
+  return out;
+}
+
+// Sobel magnitude, normalised so the strongest ~2% of edges reach 1.
+function sobel(src, w, h) {
+  const out = new Float32Array(src.length);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    const gx = -src[i - w - 1] - 2 * src[i - 1] - src[i + w - 1] + src[i - w + 1] + 2 * src[i + 1] + src[i + w + 1];
+    const gy = -src[i - w - 1] - 2 * src[i - w] - src[i - w + 1] + src[i + w - 1] + 2 * src[i + w] + src[i + w + 1];
+    out[i] = Math.hypot(gx, gy);
+  }
+  const sample = [];
+  for (let k = 0; k < 4000; k++) sample.push(out[(Math.random() * out.length) | 0]);
+  sample.sort((a, b) => a - b);
+  const ref = sample[Math.floor(sample.length * 0.98)] || 1;
+  for (let i = 0; i < out.length; i++) out[i] = Math.min(1, out[i] / ref);
+  return out;
+}
+
+let segmenterPromise = null;
+function getSegmenter() {
+  segmenterPromise ??= (async () => {
+    const { FilesetResolver, ImageSegmenter } = await import(`${MP_BASE}/vision_bundle.mjs`);
+    const fileset = await FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
+    return ImageSegmenter.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: SEG_MODEL, delegate: 'CPU' },
+      runningMode: 'IMAGE', outputConfidenceMasks: true, outputCategoryMask: false,
+    });
+  })();
+  return segmenterPromise;
+}
+
+// Returns the probability of "person" per pixel, or null if segmentation is unavailable.
+async function personMask(work) {
+  try {
+    const seg = await getSegmenter();
+    const result = seg.segment(work);
+    const masks = result.confidenceMasks;
+    // Multiclass model: mask 0 is background. Single-class model: mask 0 is the person.
+    const src = masks[0].getAsFloat32Array();
+    const mw = masks[0].width, mh = masks[0].height;
+    const out = new Float32Array(work.width * work.height);
+    for (let y = 0; y < work.height; y++) for (let x = 0; x < work.width; x++) {
+      const v = src[Math.floor(y * mh / work.height) * mw + Math.floor(x * mw / work.width)];
+      out[y * work.width + x] = masks.length > 1 ? 1 - v : v;
+    }
+    masks.forEach(m => m.close());
+    return out;
+  } catch (err) {
+    console.warn('Segmentation unavailable', err);
+    return null;
+  }
+}
+
+async function analyse(source, { cutout, alphaMask = false }) {
+  const s = Math.min(1, ANALYSIS_MAX / Math.max(source.width, source.height));
+  const w = Math.round(source.width * s), h = Math.round(source.height * s);
+  const work = document.createElement('canvas');
+  work.width = w; work.height = h;
+  const wctx = work.getContext('2d', { willReadFrequently: true });
+  wctx.drawImage(source, 0, 0, w, h);
+  const data = wctx.getImageData(0, 0, w, h).data;
+  const count = w * h;
+
+  let mask = null;
+  if (alphaMask) {
+    mask = new Float32Array(count);
+    for (let i = 0; i < count; i++) mask[i] = data[i * 4 + 3] / 255;
+  } else if (cutout) {
+    status('Detectando la silueta…');
+    const raw = await personMask(work);
+    if (raw) {
+      mask = new Float32Array(count);
+      for (let i = 0; i < count; i++) mask[i] = Math.min(1, Math.max(0, (raw[i] - 0.25) / 0.5));
+    } else {
+      status('No se pudo quitar el fondo (¿sin conexión?). Uso la foto entera.');
+    }
+  }
+  if (!mask) mask = new Float32Array(count).fill(1);
+
+  const lum = luminance(data, count);
+  const edge = sobel(blur3(blur3(lum, w, h), w, h), w, h);
+  const outline = sobel(blur3(mask, w, h), w, h);
+
+  // Bounding box of the subject, so it fills the screen even on a portrait phone.
+  let x0 = w, y0 = h, x1 = 0, y1 = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (mask[y * w + x] > 0.5) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  if (x1 <= x0 || y1 <= y0) { x0 = 0; y0 = 0; x1 = w - 1; y1 = h - 1; }
+  const padX = (x1 - x0) * 0.04, padY = (y1 - y0) * 0.04;
+  const box = { x: Math.max(0, x0 - padX), y: Math.max(0, y0 - padY), w: 0, h: 0 };
+  box.w = Math.min(w, x1 + padX) - box.x; box.h = Math.min(h, y1 + padY) - box.y;
+
+  // Bright "stars" gather on outlines and strong edges; fine dust fills the body.
+  const starW = new Float64Array(count), dustW = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    const m = mask[i];
+    if (m <= 0) continue;
+    const l = lum[i], e = edge[i];
+    starW[i] = m * (e * e * 1.5 + outline[i] * 1.6 + l * l * l * 0.2 + 0.004);
+    dustW[i] = m * (0.05 + l * 0.45 + e * 1.3);
+  }
+  return { w, h, data, lum, box, starW: cumulative(starW), dustW: cumulative(dustW) };
+}
+
+function cumulative(weights) {
+  for (let i = 1; i < weights.length; i++) weights[i] += weights[i - 1];
+  return weights;
+}
+
+function sampleIndex(cdf) {
+  const t = Math.random() * cdf[cdf.length - 1];
+  let lo = 0, hi = cdf.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cdf[mid] < t) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
+// ---------- Build particles from an analysis ----------
+const PINK = [1, 0.68, 0.8];
+
 function redFor(f) {
   f = Math.max(0, Math.min(1, f));
-  const r = 70 + 185 * f, g = 30 * f, b = 10 + 40 * f;
-  return pack(r, g, b);
-}
-
-function pack(r, g, b) {
-  return (255 << 24) | (b << 16) | (g << 8) | r; // little-endian RGBA
-}
-
-function alloc(count) {
-  n = count;
-  hx = new Float32Array(n); hy = new Float32Array(n);
-  px = new Float32Array(n); py = new Float32Array(n);
-  vx = new Float32Array(n); vy = new Float32Array(n);
-  col = new Uint32Array(n); colRed = new Uint32Array(n);
+  return [(70 + 185 * f) / 255, (30 * f) / 255, (10 + 40 * f) / 255];
 }
 
 function build() {
-  if (img) buildFromImage(); else buildHeart();
-}
+  if (!analysis) return;
+  const a = analysis;
+  const scale = Math.min(W * 0.94 / a.box.w, H * 0.88 / a.box.h);
 
-// Default scene: the heart from the reel, so the page isn't empty before loading a photo.
-function buildHeart() {
-  const heart = u => [
-    1.6 * Math.sin(u) ** 3,
-    1.3 * Math.cos(u) - 0.5 * Math.cos(2 * u) - 0.2 * Math.cos(3 * u) - 0.1 * Math.cos(4 * u),
-  ];
-  const poly = Array.from({ length: 300 }, (_, i) => heart(i / 300 * Math.PI * 2));
-  const ys = poly.map(p => p[1]), yMin = Math.min(...ys), yMax = Math.max(...ys);
-  const scale = Math.min(W / 3.6, H / (yMax - yMin) * 0.85), cy = (yMax + yMin) / 2;
-  const inside = (x, y) => {
-    let c = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const [xi, yi] = poly[i], [xj, yj] = poly[j];
-      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
-    }
-    return c;
+  // Tuned for a phone (subject ~360x240 CSS px); bigger screens get more and larger points.
+  const area = (a.box.w * scale / dpr) * (a.box.h * scale / dpr) / (360 * 240);
+  const k = +ui('density').value * Math.min(2.2, Math.max(0.8, area ** 0.35));
+  const sizeK = Math.min(1.8, Math.max(0.8, area ** 0.25));
+  // The finger/cursor radius follows the subject's on-screen size too.
+  reach = Math.min(1.2, Math.max(0.45, (a.box.w * scale / dpr) / 900));
+  const counts = { stars: Math.round(BASE.stars * k), dust: Math.round(BASE.dust * k), sky: Math.round(BASE.sky * k) };
+  const total = counts.stars + counts.dust + counts.sky;
+  const ox = (W - a.box.w * scale) / 2 - a.box.x * scale;
+  const oy = (H - a.box.h * scale) / 2 - a.box.y * scale;
+
+  const old = { n, pos, vx, vy };
+  n = total;
+  hx = new Float32Array(n); hy = new Float32Array(n);
+  pos = new Float32Array(n * 3); vx = new Float32Array(n); vy = new Float32Array(n);
+  sizes = new Float32Array(n); phases = new Float32Array(n);
+  palettes = { brillo: new Float32Array(n * 4), original: new Float32Array(n * 4), rojo: new Float32Array(n * 4) };
+
+  const put = (i, x, y, size, alpha, rgb, tint) => {
+    hx[i] = x; hy[i] = y; sizes[i] = size * sizeK * dpr; phases[i] = Math.random();
+    const white = tint ? [1, 1, 1].map((v, c) => v * 0.8 + rgb[c] * 0.2) : [1, 1, 1];
+    const boosted = rgb.map(v => Math.min(1, v * 1.35 + 0.05));
+    const lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+    palettes.brillo.set([...white, alpha], i * 4);
+    palettes.original.set([...boosted, alpha], i * 4);
+    palettes.rojo.set([...redFor(0.35 + lum), alpha], i * 4);
   };
+  const pixel = idx => [a.data[idx * 4] / 255, a.data[idx * 4 + 1] / 255, a.data[idx * 4 + 2] / 255];
 
-  // Rejection sampling fills the heart evenly (sampling the angle bunches points on the center line).
-  const N = 9000;
-  alloc(N);
-  for (let i = 0; i < N; ) {
-    const x = (Math.random() * 2 - 1) * 1.6, y = yMin + Math.random() * (yMax - yMin);
-    if (!inside(x, y)) continue;
-    const z = Math.random() * 2 - 1;
-    hx[i] = W / 2 + x * scale;
-    hy[i] = H / 2 - (y - cy) * scale;
-    colRed[i] = col[i] = redFor((z + 1) / 2);
-    i++;
+  let i = 0;
+  // Faint sky of dust across the whole screen.
+  for (let c = 0; c < counts.sky; c++, i++) {
+    put(i, Math.random() * W, Math.random() * H, 1 + Math.random() * 1.2, 0.18 + Math.random() * 0.3, [1, 1, 1], false);
   }
-  scatter();
-}
+  for (let c = 0; c < counts.dust; c++, i++) {
+    const idx = sampleIndex(a.dustW), px = idx % a.w, py = (idx / a.w) | 0;
+    const l = a.lum[idx];
+    put(i, ox + (px + Math.random()) * scale, oy + (py + Math.random()) * scale,
+        1.3 + Math.random() * 1.4, 0.28 + l * 0.5, pixel(idx), true);
+  }
+  for (let c = 0; c < counts.stars; c++, i++) {
+    const idx = sampleIndex(a.starW), px = idx % a.w, py = (idx / a.w) | 0;
+    const rgb = Math.random() < 0.07 ? PINK : pixel(idx);
+    put(i, ox + (px + Math.random()) * scale, oy + (py + Math.random()) * scale,
+        3.5 + Math.random() * 5 + a.lum[idx] * 3, 0.65 + Math.random() * 0.35, rgb, rgb !== PINK);
+    if (rgb === PINK) palettes.brillo.set(PINK, i * 4);
+  }
 
-// Sample the image on a grid; each sampled pixel becomes one particle with that pixel's color.
-function buildFromImage() {
-  const step = +ui('step').value * Math.min(window.devicePixelRatio || 1, 2);
-  const fit = Math.min(W / img.width, H / img.height) * 0.95;
-  const dw = Math.floor(img.width * fit), dh = Math.floor(img.height * fit);
-  const ox = (W - dw) >> 1, oy = (H - dh) >> 1;
-
-  const off = document.createElement('canvas');
-  off.width = dw; off.height = dh;
-  const octx = off.getContext('2d', { willReadFrequently: true });
-  octx.drawImage(img, 0, 0, dw, dh);
-  const data = octx.getImageData(0, 0, dw, dh).data;
-
-  const xs = [], ys = [], cs = [], rs = [];
-  for (let y = 0; y < dh; y += step) {
-    for (let x = 0; x < dw; x += step) {
-      const k = ((y | 0) * dw + (x | 0)) * 4;
-      const r = data[k], g = data[k + 1], b = data[k + 2], a = data[k + 3];
-      if (a < 128) continue;
-      const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-      // Very dark pixels are thinned out so shadows read as empty space, like the reel.
-      if (lum < 0.08 && Math.random() > lum * 8) continue;
-      const jx = (Math.random() - 0.5) * step * 0.6, jy = (Math.random() - 0.5) * step * 0.6;
-      xs.push(ox + x + jx); ys.push(oy + y + jy);
-      cs.push(pack(r, g, b)); rs.push(redFor(lum * 1.3));
+  // Reuse previous positions so a new image morphs out of the old one.
+  for (let j = 0; j < n; j++) {
+    if (j < old.n) {
+      pos[j * 3] = old.pos[j * 3]; pos[j * 3 + 1] = old.pos[j * 3 + 1];
+      vx[j] = old.vx[j]; vy[j] = old.vy[j];
+    } else {
+      pos[j * 3] = Math.random() * W; pos[j * 3 + 1] = Math.random() * H;
     }
   }
-  alloc(xs.length);
-  hx.set(xs); hy.set(ys); col.set(cs); colRed.set(rs);
-  scatter();
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.size); gl.bufferData(gl.ARRAY_BUFFER, sizes, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.phase); gl.bufferData(gl.ARRAY_BUFFER, phases, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.pos); gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+  uploadColors();
 }
 
-// Particles start scattered and flow into place.
-function scatter() {
-  for (let i = 0; i < n; i++) {
-    px[i] = Math.random() * W; py[i] = Math.random() * H;
-    vx[i] = vy[i] = 0;
-  }
+function uploadColors() {
+  if (!n) return;
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.color);
+  gl.bufferData(gl.ARRAY_BUFFER, palettes[ui('mode').value], gl.STATIC_DRAW);
 }
 
-function step() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const R = +ui('radius').value * dpr, R2 = R * R;
-  const F = +ui('force').value * 0.35;
+// ---------- Simulation ----------
+function frame(t) {
+  const R = +ui('radius').value * dpr * reach, R2 = R * R;
+  const F = +ui('force').value * 0.3 * dpr;
   const damp = +ui('visc').value / 100;
-  const spring = 0.012;
-  const red = ui('mode').value === 'rojo';
-  const colors = red ? colRed : col;
-  const mx = mouse.x, my = mouse.y, mvx = mouse.vx, mvy = mouse.vy;
-  const stir = Math.min(Math.hypot(mvx, mvy), 60);
+  const spring = 0.014;
+  const { x: mx, y: my, vx: mvx, vy: mvy, active } = pointer;
+  const stir = Math.min(Math.hypot(mvx, mvy), 60 * dpr);
 
-  buf.fill(0xff020005);
   for (let i = 0; i < n; i++) {
-    let ax = (hx[i] - px[i]) * spring, ay = (hy[i] - py[i]) * spring;
-
-    if (mouse.active) {
-      const dx = px[i] - mx, dy = py[i] - my, d2 = dx * dx + dy * dy;
+    const j = i * 3;
+    let x = pos[j], y = pos[j + 1];
+    let ax = (hx[i] - x) * spring, ay = (hy[i] - y) * spring;
+    if (active) {
+      const dx = x - mx, dy = y - my, d2 = dx * dx + dy * dy;
       if (d2 < R2 && d2 > 0.01) {
-        const d = Math.sqrt(d2), t = 1 - d / R, s = t * t;
-        // Push outward from the cursor, plus drag along its motion so it feels like stirring a liquid.
-        ax += (dx / d) * s * F + mvx * s * 0.12;
-        ay += (dy / d) * s * F + mvy * s * 0.12;
-        // A little swirl perpendicular to the push gives the flow some curl.
-        ax += (-dy / d) * s * stir * 0.02;
-        ay += (dx / d) * s * stir * 0.02;
+        const d = Math.sqrt(d2), s = (1 - d / R) ** 2;
+        // Outward push, drag along the pointer's motion, and a little swirl: reads as stirring a liquid.
+        ax += (dx / d) * s * F + mvx * s * 0.12 + (-dy / d) * s * stir * 0.02;
+        ay += (dy / d) * s * F + mvy * s * 0.12 + (dx / d) * s * stir * 0.02;
       }
     }
-
-    vx[i] = (vx[i] + ax) * damp;
-    vy[i] = (vy[i] + ay) * damp;
-    px[i] += vx[i]; py[i] += vy[i];
-
-    const x = px[i] | 0, y = py[i] | 0;
-    if (x < 0 || y < 0 || x >= W - 1 || y >= H - 1) continue;
-    const k = y * W + x, c = colors[i];
-    buf[k] = c; buf[k + 1] = c; buf[k + W] = c; buf[k + W + 1] = c;
+    const nvx = (vx[i] + ax) * damp, nvy = (vy[i] + ay) * damp;
+    vx[i] = nvx; vy[i] = nvy;
+    pos[j] = x + nvx; pos[j + 1] = y + nvy;
+    pos[j + 2] = Math.abs(nvx) + Math.abs(nvy);
   }
-  ctx.putImageData(frame, 0, 0);
+  pointer.vx *= 0.8; pointer.vy *= 0.8;
 
-  mouse.vx *= 0.8; mouse.vy *= 0.8;
-  requestAnimationFrame(step);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  if (n) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.pos);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos);
+    gl.uniform2f(loc.res, W, H);
+    gl.uniform1f(loc.time, t / 1000);
+    gl.drawArrays(gl.POINTS, 0, n);
+  }
+  requestAnimationFrame(frame);
 }
 
-function pointer(e) {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const x = e.clientX * dpr, y = e.clientY * dpr;
-  if (mouse.active) { mouse.vx = x - mouse.x; mouse.vy = y - mouse.y; }
-  mouse.x = x; mouse.y = y; mouse.active = true;
+// ---------- Sources ----------
+function heartSource() {
+  const size = 600, c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(size * 0.42, size * 0.38, 10, size / 2, size / 2, size * 0.5);
+  grad.addColorStop(0, '#ff3a5a'); grad.addColorStop(1, '#5a0010');
+  g.fillStyle = grad;
+  g.beginPath();
+  for (let i = 0; i <= 300; i++) {
+    const u = i / 300 * Math.PI * 2;
+    const x = 1.6 * Math.sin(u) ** 3;
+    const y = 1.3 * Math.cos(u) - 0.5 * Math.cos(2 * u) - 0.2 * Math.cos(3 * u) - 0.1 * Math.cos(4 * u);
+    g.lineTo(size / 2 + x * 170, size * 0.45 - y * 170);
+  }
+  g.fill();
+  return c;
 }
-canvas.addEventListener('pointermove', pointer);
-canvas.addEventListener('pointerdown', pointer);
-canvas.addEventListener('pointerleave', () => { mouse.active = false; });
+
+let photo = null;
+async function showPhoto() {
+  status('Analizando la foto…');
+  await new Promise(r => setTimeout(r, 30));   // let the status paint before heavy work
+  analysis = await analyse(photo, { cutout: ui('cutout').checked });
+  build();
+  if (ui('status').textContent.startsWith('No se pudo')) setTimeout(() => status(''), 4000);
+  else status('');
+}
 
 function loadFile(file) {
   if (!file || !file.type.startsWith('image/')) return;
   const url = URL.createObjectURL(file);
   const im = new Image();
-  im.onload = () => { img = im; build(); URL.revokeObjectURL(url); };
+  im.onload = () => {
+    photo = im;
+    ui('mode').value = 'brillo';
+    showPhoto().finally(() => URL.revokeObjectURL(url));
+  };
   im.src = url;
+}
+
+// ---------- Input & UI ----------
+function onPointer(e) {
+  const x = e.clientX * dpr, y = e.clientY * dpr;
+  if (pointer.active) { pointer.vx = x - pointer.x; pointer.vy = y - pointer.y; }
+  pointer.x = x; pointer.y = y; pointer.active = true;
+}
+canvas.addEventListener('pointermove', onPointer);
+canvas.addEventListener('pointerdown', e => { pointer.active = false; onPointer(e); ui('panel').classList.remove('open'); });
+for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
+  canvas.addEventListener(ev, e => { if (e.pointerType !== 'mouse' || ev === 'pointerleave') pointer.active = false; });
 }
 
 ui('pick').onclick = () => ui('file').click();
 ui('file').onchange = e => loadFile(e.target.files[0]);
-ui('step').oninput = () => img && build();
-ui('toggle').onclick = () => {
-  const p = ui('panel');
-  p.classList.toggle('hidden');
-  ui('toggle').textContent = p.classList.contains('hidden') ? 'Mostrar panel' : 'Ocultar panel';
-};
-addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
-addEventListener('dragleave', () => document.body.classList.remove('dragging'));
-addEventListener('drop', e => {
-  e.preventDefault(); document.body.classList.remove('dragging');
-  loadFile(e.dataTransfer.files[0]);
+ui('settings').onclick = () => ui('panel').classList.toggle('open');
+ui('mode').onchange = uploadColors;
+ui('density').onchange = build;
+ui('cutout').onchange = () => photo && showPhoto();
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); loadFile(e.dataTransfer.files[0]); });
+let resizeTimer;
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (resize()) build(); }, 150);
 });
-addEventListener('resize', resize);
 
 resize();
-requestAnimationFrame(step);
+ui('mode').value = 'original';
+analysis = await analyse(heartSource(), { alphaMask: true });
+build();
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
